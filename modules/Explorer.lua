@@ -908,6 +908,7 @@ local function main()
 		if env.setclipboard then context:AddRegistered("COPY_PATH") end
 		context:AddRegistered("INSERT_OBJECT")
 		context:AddRegistered("SAVE_INST")
+		context:AddRegistered("SAVE_ALL_TO_FOLDER", env.writefile == nil or env.makefolder == nil or env.isfolder == nil or not env.isdecompile())
 		-- context:AddRegistered("CALL_FUNCTION")
 		-- context:AddRegistered("VIEW_CONNECTIONS")
 		-- context:AddRegistered("GET_REFERENCES")
@@ -1384,6 +1385,16 @@ local function main()
 					task.wait(0.1)
 				end
 			end
+		end})
+
+		context:Register("SAVE_ALL_TO_FOLDER",{Name = "Save All To Folder", IconMap = Explorer.MiscIcons, Icon = "Save", DisabledIcon = "Empty", OnClick = function()
+			local objs = {}
+			for _,node in next,selection.List do
+				if node.Obj and node ~= nilNode then
+					objs[#objs+1] = node.Obj
+				end
+			end
+			Main.SaveAllToFolder(objs)
 		end})
 
         --[[context:Register("VIEW_CONNECTIONS",{Name = "View Connections", OnClick = function()
