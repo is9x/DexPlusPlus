@@ -1511,6 +1511,174 @@ Main = (function()
 		end
 	end
 
+	-- Save All To Folder
+	-- Decompiles every script under the given objects and writes them to the executor workspace.
+	-- Layout:
+	--   Container (Folder/Service/Model...) -> folder
+	--   Script without script children      -> Name.lua
+	--   Script with script children         -> Name/Name.lua + Name/Children/<children, same rules>
+	Main.SaveAllToFolder = function(objects)
+		if not (env.writefile and env.makefolder and env.isfolder) then
+			warn("[Dex++] Your executor has no filesystem API (writefile/makefolder/isfolder).")
+			return
+		end
+		if not env.isdecompile() then
+			warn("[Dex++] No decompiler available.")
+			return
+		end
+
+		objects = objects or {}
+		if #objects == 0 then return end
+
+		-- Drop objects whose ancestor is also selected (avoids duplicate output)
+		local selectedSet = {}
+		for _, o in ipairs(objects) do selectedSet[o] = true end
+		local roots = {}
+		for _, o in ipairs(objects) do
+			local p, skip = o.Parent, false
+			while p do
+				if selectedSet[p] then skip = true break end
+				p = p.Parent
+			end
+			if not skip then roots[#roots + 1] = o end
+		end
+
+		local function cleanName(name)
+			name = env.parsefile(name)
+			name = name:gsub("^%s+", ""):gsub("[%s%.]+$", "")
+			if name == "" then name = "Unnamed" end
+			return name
+		end
+
+		local function uniqueName(used, name)
+			name = cleanName(name)
+			local final, n = name, 1
+			while used[final:lower()] do
+				n = n + 1
+				final = name .. "_" .. n
+			end
+			used[final:lower()] = true
+			return final
+		end
+
+		local function ensureFolder(path)
+			local current
+			for part in path:gmatch("[^/]+") do
+				current = current and (current .. "/" .. part) or part
+				if not env.isfolder(current) then
+					env.makefolder(current)
+				end
+			end
+		end
+
+		local hasCache = {}
+		local function hasScripts(obj)
+			local cached = hasCache[obj]
+			if cached ~= nil then return cached end
+			local result = obj:IsA("LuaSourceContainer")
+			if not result then
+				for _, c in ipairs(obj:GetChildren()) do
+					if hasScripts(c) then result = true break end
+				end
+			end
+			hasCache[obj] = result
+			return result
+		end
+
+		local function scriptKids(obj)
+			local kids = {}
+			for _, c in ipairs(obj:GetChildren()) do
+				if hasScripts(c) then kids[#kids + 1] = c end
+			end
+			return kids
+		end
+
+		-- Count for progress
+		local total, done, failed = 0, 0, 0
+		local function count(obj)
+			if obj:IsA("LuaSourceContainer") then total = total + 1 end
+			for _, c in ipairs(obj:GetChildren()) do count(c) end
+		end
+		for _, r in ipairs(roots) do count(r) end
+		if total == 0 then
+			warn("[Dex++] No scripts found in selection.")
+			return
+		end
+
+		local rootName = #roots == 1 and cleanName(roots[1].Name) or "Selection"
+		local outDir = "dex/saved/Scripts_" .. rootName .. "_" .. os.date("%Y%m%d_%H%M%S")
+		ensureFolder(outDir)
+
+		local function writeScript(obj, dir, fileBase)
+			local src
+			if env.isViableDecompileScript(obj) then
+				local ok, result = pcall(env.decompile, obj)
+				if ok and type(result) == "string" then
+					src = result
+				else
+					failed = failed + 1
+					src = "-- Decompile failed:\n--[[\n" .. tostring(result) .. "\n--]]"
+				end
+			else
+				src = "-- Script is not decompilable from the client (server-side Script)"
+			end
+
+			local header = "-- Path: " .. obj:GetFullName() .. "\n-- Class: " .. obj.ClassName .. "\n\n"
+			local s, e = pcall(env.writefile, dir .. "/" .. fileBase .. ".lua", header .. src)
+			if not s then
+				failed = failed + 1
+				warn("[Dex++] Failed to write " .. fileBase .. ": " .. tostring(e))
+			end
+
+			done = done + 1
+			if done % 10 == 0 or done == total then
+				warn(("[Dex++] Save All: %d/%d scripts"):format(done, total))
+			end
+			if done % 5 == 0 then task.wait() end
+		end
+
+		local function process(obj, dir, used)
+			if obj:IsA("LuaSourceContainer") then
+				local name = uniqueName(used, obj.Name)
+				local kids = scriptKids(obj)
+				if #kids == 0 then
+					writeScript(obj, dir, name)
+				else
+					local scriptDir = dir .. "/" .. name
+					ensureFolder(scriptDir)
+					writeScript(obj, scriptDir, name)
+
+					local childrenDir = scriptDir .. "/Children"
+					ensureFolder(childrenDir)
+					local childUsed = {}
+					for _, kid in ipairs(kids) do
+						process(kid, childrenDir, childUsed)
+					end
+				end
+			else
+				local kids = scriptKids(obj)
+				if #kids == 0 then return end
+				local folderDir = dir .. "/" .. uniqueName(used, obj.Name)
+				ensureFolder(folderDir)
+				local childUsed = {}
+				for _, kid in ipairs(kids) do
+					process(kid, folderDir, childUsed)
+				end
+			end
+		end
+
+		task.spawn(function()
+			warn(("[Dex++] Save All started: %d scripts -> %s"):format(total, outDir))
+			local used = {}
+			for _, r in ipairs(roots) do
+				local s, e = pcall(process, r, outDir, used)
+				if not s then warn("[Dex++] Error while saving " .. r.Name .. ": " .. tostring(e)) end
+			end
+			warn(("[Dex++] Save All finished. %d/%d scripts, %d problems. Folder: %s"):format(done, total, failed, outDir))
+			if env.setclipboard then pcall(env.setclipboard, outDir) end
+		end)
+	end
+
 	Main.LocalDepsUpToDate = function()
 		return Main.DepsVersionData and Main.ClientVersion == Main.DepsVersionData[1]
 	end
